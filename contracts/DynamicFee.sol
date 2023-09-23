@@ -1,134 +1,77 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.20;
 
-import {Hooks} from './contracts/libraries/Hooks.sol';
-import {IPoolManager} from './contracts/interfaces/IPoolManager.sol';
-import {IHooks} from './contracts/interfaces/IHooks.sol';
-import {BalanceDelta} from './contracts/types/BalanceDelta.sol';
-import {PoolKey} from './contracts/types/PoolKey.sol';
+import {IPoolManager} from './interfaces/IPoolManager.sol';
+import {IDynamicFeeManager} from './interfaces/IDynamicFeeManager.sol';
+import {Hooks} from './libraries/Hooks.sol';
+import {FeeLibrary} from './libraries/FeeLibrary.sol';
+import {BaseHook} from './BaseHook.sol';
+import {PoolKey} from './types/PoolKey.sol';
 
-abstract contract BaseHook is IHooks {
-    error NotPoolManager();
-    error NotSelf();
-    error InvalidPool();
-    error LockFailure();
-    error HookNotImplemented();
-
-    /// @notice The address of the pool manager
-    IPoolManager public immutable poolManager;
-
-    constructor(IPoolManager _poolManager) {
-        poolManager = _poolManager;
-        validateHookAddress(this);
-    }
-
-    /// @dev Only the pool manager may call this function
-    modifier poolManagerOnly() {
-        if (msg.sender != address(poolManager)) revert NotPoolManager();
-        _;
-    }
-
-    /// @dev Only this address may call this function
-    modifier selfOnly() {
-        if (msg.sender != address(this)) revert NotSelf();
-        _;
-    }
-
-    /// @dev Only pools with hooks set to this contract may call this function
-    modifier onlyValidPools(IHooks hooks) {
-        if (hooks != this) revert InvalidPool();
-        _;
-    }
-
-    function getHooksCalls() public pure virtual returns (Hooks.Calls memory);
-
-    // this function is virtual so that we can override it during testing,
-    // which allows us to deploy an implementation to any address
-    // and then etch the bytecode into the correct address
-    function validateHookAddress(BaseHook _this) internal pure virtual {
-        Hooks.validateHookAddress(_this, getHooksCalls());
-    }
-
-    function lockAcquired(bytes calldata data) external virtual poolManagerOnly returns (bytes memory) {
-        (bool success, bytes memory returnData) = address(this).call(data);
-        if (success) return returnData;
-        if (returnData.length == 0) revert LockFailure();
-        // if the call failed, bubble up the reason
-        /// @solidity memory-safe-assembly
+contract InferCallContract {
+    function inferCall(string calldata modelName, string calldata inputData) public returns (bytes32) {
+        bytes32[2] memory output;
+        bytes memory args = abi.encodePacked(modelName, '-', inputData);
         assembly {
-            revert(add(returnData, 32), mload(returnData))
+            if iszero(staticcall(not(0), 0x100, add(args, 32), mload(args), output, 12)) {
+                revert(0, 0)
+            }
         }
+        return output[0];
+    }
+}
+
+contract DynamicFeeHook is BaseHook, IDynamicFeeManager, InferCallContract {
+    using FeeLibrary for uint24;
+
+    error MustUseDynamicFee();
+    uint24 fee;
+    uint32 deployTimestamp;
+
+    function setFee(string calldata modelName, string calldata inputData) public {
+        bytes32 data = inferCall(modelName, inputData);
+        fee = uint24(uint256(data) & 0xFFFFFF);
     }
 
-    function beforeInitialize(address, PoolKey calldata, uint160, bytes calldata) external virtual returns (bytes4) {
-        revert HookNotImplemented();
-    }
-
-    function afterInitialize(
+    function getFee(
         address,
         PoolKey calldata,
+        IPoolManager.SwapParams calldata,
+        bytes calldata
+    ) external view returns (uint24) {
+        return fee;
+    }
+
+    /// @dev For mocking
+    function _blockTimestamp() internal view virtual returns (uint32) {
+        return uint32(block.timestamp);
+    }
+
+    constructor(IPoolManager _poolManager) BaseHook(_poolManager) {
+        deployTimestamp = _blockTimestamp();
+    }
+
+    function getHooksCalls() public pure override returns (Hooks.Calls memory) {
+        return
+            Hooks.Calls({
+                beforeInitialize: true,
+                afterInitialize: false,
+                beforeModifyPosition: false,
+                afterModifyPosition: false,
+                beforeSwap: false,
+                afterSwap: false,
+                beforeDonate: false,
+                afterDonate: false
+            });
+    }
+
+    function beforeInitialize(
+        address,
+        PoolKey calldata key,
         uint160,
-        int24,
         bytes calldata
-    ) external virtual returns (bytes4) {
-        revert HookNotImplemented();
-    }
-
-    function beforeModifyPosition(
-        address,
-        PoolKey calldata,
-        IPoolManager.ModifyPositionParams calldata,
-        bytes calldata
-    ) external virtual returns (bytes4) {
-        revert HookNotImplemented();
-    }
-
-    function afterModifyPosition(
-        address,
-        PoolKey calldata,
-        IPoolManager.ModifyPositionParams calldata,
-        BalanceDelta,
-        bytes calldata
-    ) external virtual returns (bytes4) {
-        revert HookNotImplemented();
-    }
-
-    function beforeSwap(
-        address,
-        PoolKey calldata,
-        IPoolManager.SwapParams calldata,
-        bytes calldata
-    ) external virtual returns (bytes4) {
-        revert HookNotImplemented();
-    }
-
-    function afterSwap(
-        address,
-        PoolKey calldata,
-        IPoolManager.SwapParams calldata,
-        BalanceDelta,
-        bytes calldata
-    ) external virtual returns (bytes4) {
-        revert HookNotImplemented();
-    }
-
-    function beforeDonate(
-        address,
-        PoolKey calldata,
-        uint256,
-        uint256,
-        bytes calldata
-    ) external virtual returns (bytes4) {
-        revert HookNotImplemented();
-    }
-
-    function afterDonate(
-        address,
-        PoolKey calldata,
-        uint256,
-        uint256,
-        bytes calldata
-    ) external virtual returns (bytes4) {
-        revert HookNotImplemented();
+    ) external pure override returns (bytes4) {
+        if (!key.fee.isDynamicFee()) revert MustUseDynamicFee();
+        return DynamicFeeHook.beforeInitialize.selector;
     }
 }
