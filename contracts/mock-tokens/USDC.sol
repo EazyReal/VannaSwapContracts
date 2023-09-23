@@ -7,8 +7,12 @@ import '@openzeppelin/contracts/access/Ownable.sol';
 
 contract MyToken is ERC20, Pausable, Ownable {
     constructor() ERC20('USDC', 'USDC') {
-        _setupDecimals(6);
+        // _setupDecimals(6);
         _mint(msg.sender, 1000000 * 10 ** decimals());
+    }
+
+    function decimals() public pure override returns (uint8) {
+        return 6;
     }
 
     function pause() public onlyOwner {
